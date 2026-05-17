@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>純離線網頁語音轉文字</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 40px auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        button {
+            padding: 12px 24px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            border: none;
+            border-radius: 4px;
+            margin-right: 10px;
+        }
+        #status {
+            margin: 15px 0;
+            font-weight: bold;
+            color: #555;
+        }
+        #output {
+            width: 100%;
+            height: 250px;
+            margin-top: 15px;
+            padding: 15px;
+            font-size: 18px;
+            line-height: 1.6;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            background-color: #fafafa;
+            box-sizing: border-box;
+        }
+        .btn-start { background-color: #28a745; color: white; }
+        .btn-stop { background-color: #dc3545; color: white; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>純離線網頁語音轉文字 (ONNX Runtime / Whisper)</h2>
+    <div id="status">正在初始化系統，請稍候...</div>
+    
+    <button id="startBtn" class="btn-start" disabled>開始錄音</button>
+    <button id="stopBtn" class="btn-stop" disabled>停止並轉文字</button>
+    
+    <textarea id="output" placeholder="轉換後的文字將顯示於此..." readonly></textarea>
+</div>
+
+<script type="module">
+    import { pipeline } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2';
+
+    let transcriber;
+    let mediaRecorder;
+    let audioChunks = [];
+    let audioContext;
+
+    const statusDiv = document.getElementById('status');
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const outputTextarea = document.getElementById('output');
+
+    // 1. 網頁開啟時，自動非同步下載並載入離線模型
+    async function initModels() {
+        try {
+            statusDiv.innerText = "正在從雲端快取 Whisper 最輕量模型 (僅約 75MB)，請保持網路連線...";
+            
+            // 使用專為多語言優化的 whisper-tiny.en 或者是符合中文需求的等價模型
+            // 這裡使用 Xenova 封裝好的 ONNX 量化版模型，下載後會永久快取在瀏覽器中
+            transcriber = await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny');
+            
+            statusDiv.innerText = "系統就緒！模型已成功下載至瀏覽器快取。現在您可以切斷網路，體驗完全離線轉錄。";
+            startBtn.disabled = false;
+        } catch (error) {
+            statusDiv.innerText = "模型載入失敗，請檢查網路連線後重新整理頁面。";
+            console.error(error);
+        }
+    }
+
+    // 2. 處理錄音邏輯
+    startBtn.onclick = async () => {
+        audioChunks = [];
+        outputTextarea.value = "正在聆聽中...請對著麥克風說話。";
+        
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 }); // Whisper 最愛 16kHz
+            
+            mediaRecorder = new MediaRecorder(stream);
+            mediaRecorder.ondataavailable = event => {
+                if (event.data.size > 0) audioChunks.push(event.data);
+            };
+
+            mediaRecorder.onstop = async () => {
+                statusDiv.innerText = "錄音結束，正在本地端進行語音識別 (不消耗任何網路流量)...";
+                
+                // 將錄製好的音訊轉成 Whisper 可讀取的 Float32Array 格式
+                const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+                const arrayBuffer = await audioBlob.arrayBuffer();
+                const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+                const float32Audio = audioBuffer.getChannelData(0);
+
+                // 執行本地離線辨識
+                const startT = performance.now();
+                const result = await transcriber(float32Audio, {
+                    chunk_length_s: 30,
+                    stride_length_s: 5,
+                    language: 'chinese', // 指定中文
+                    task: 'transcribe',
+                });
+                const endT = performance.now();
+
+                outputTextarea.value = result.text;
+                statusDiv.innerText = `辨識完成！耗時 ${((endT - startT)/1000).toFixed(2)} 秒。`;
+                startBtn.disabled = false;
+                stopBtn.disabled = true;
+            };
+
+            mediaRecorder.start();
+            startBtn.disabled = true;
+            stopBtn.disabled = false;
+            statusDiv.innerText = "正在錄音中...";
+        } catch (err) {
+            alert("無法存取麥克風，請檢查權限設定！");
+            console.error(err);
+        }
+    };
+
+    stopBtn.onclick = () => {
+        if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+            mediaRecorder.stop();
+            // 關閉麥克風軌道以省電
+            mediaRecorder.stream.getTracks().forEach(track => track.stop());
+        }
+    };
+
+    // 啟動初始化
+    initModels();
+</script>
+
+</body>
+</html>
